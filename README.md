@@ -226,6 +226,8 @@ That's it. You're done.
 
 Only add these if you want to change something. All have defaults, and a 5-line `.env` is a complete, working configuration — the defaults are preferences, not blanks you must fill.
 
+[`.env.example`](.env.example) has all of these written out with comments, if you would rather start from a file than this table.
+
 The one to know about is `DOCKHAND_TOKEN`: it is empty by default, which is correct only if Dockhand authentication is off. With it on you get `401` in the log and just add the token.
 
 `DOCKHAND_URL` is `http://dockhand:3000`, which is right for a normal Dockhand install. The rest only change timing, naming, or which variable is edited.

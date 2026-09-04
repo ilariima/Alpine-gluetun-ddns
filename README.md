@@ -38,20 +38,24 @@ DDNS_HOST=CHANGE_ME.example.com
 GLUETUN_STACK_DIR_HOST="/var/lib/docker/volumes/dockhand_dockhand_data/_data/stacks/Your Environment/gluetun"
 DOCKHAND_STACK=gluetun
 DOCKHAND_NETWORK=your_dockhand_network
-DOCKHAND_ENV_NAME="CHANGE_ME"
+DOCKHAND_ENV_NAME="Your Environment"
 
 --------------------------------------------------------------
   [ok]   found the Gluetun .env
   [ok]   WIREGUARD_ENDPOINT_IP is already set in it
+  [ok]   environment name read from the stack path
   [note] other Dockhand networks: dockhand_socket-proxy
 
-  Now replace the two CHANGE_ME values:
-    DDNS_HOST          your DDNS hostname
-    DOCKHAND_ENV_NAME  the name in Dockhand's environment menu
+  Only DDNS_HOST is left. Replace CHANGE_ME.example.com with the
+  DDNS hostname that follows your VPN endpoint. Nothing on this
+  host knows it, so it is the one value you have to supply.
+
+  If Dockhand has authentication turned on, also add a line:
+    DOCKHAND_TOKEN=dh_your_token_here
 ==============================================================
 ```
 
-Two `[ok]` lines means the values are good. If it says **COULD NOT WORK IT OUT**, your containers are named something other than `gluetun` and `dockhand` — edit the two names at the top of the script and run it again.
+Three `[ok]` lines means everything it worked out is good. If it says **COULD NOT WORK IT OUT**, your containers are named something other than `gluetun` and `dockhand` — edit the two names at the top of the script and run it again.
 
 Dockhand is usually on more than one network. The script skips its `socket-proxy` network, since the watcher has no business reaching a Docker socket proxy, and picks a normal one instead. Others are listed if you want a different one.
 
@@ -68,6 +72,11 @@ NETS=$(sudo docker inspect "$DOCKHAND" --format '{{range $n, $_ := .NetworkSetti
 NET=$(printf '%s\n' "$NETS" | grep -v 'socket-proxy' | head -n 1); [ -n "$NET" ] || NET=$(printf '%s\n' "$NETS" | head -n 1)
 OTHER=$(printf '%s\n' "$NETS" | grep -v "^${NET}$" | tr '\n' ' ')
 
+# Dockhand stores stacks as .../stacks/<environment>/<stack>, so the
+# environment name is the directory above the stack directory.
+ENVNAME=$(basename "$(dirname "$WD")" 2>/dev/null)
+case "$ENVNAME" in stacks|/|.|'') ENVNAME="" ;; esac
+
 DIR=""; B=0
 while IFS='|' read -r d s; do
   [ -n "$d" ] || continue
@@ -80,6 +89,13 @@ if [ -n "$DIR" ] && sudo test -f "$DIR/.env"; then
   sudo grep -q '^WIREGUARD_ENDPOINT_IP=' "$DIR/.env" \
     && CHK="[ok]   WIREGUARD_ENDPOINT_IP is already set in it" \
     || CHK="[note] WIREGUARD_ENDPOINT_IP not set yet; the watcher will add it"
+  if [ -n "$ENVNAME" ]; then
+    ENVLINE="DOCKHAND_ENV_NAME=\"$ENVNAME\""
+    ENVCHK="[ok]   environment name read from the stack path"
+  else
+    ENVLINE='DOCKHAND_ENV_NAME="CHANGE_ME"'
+    ENVCHK="[!]    could not read the environment name; copy it from Dockhand's menu"
+  fi
   cat <<OUT
 
 
@@ -91,16 +107,20 @@ DDNS_HOST=CHANGE_ME.example.com
 GLUETUN_STACK_DIR_HOST="$DIR"
 DOCKHAND_STACK=$PROJ
 DOCKHAND_NETWORK=$NET
-DOCKHAND_ENV_NAME="CHANGE_ME"
+$ENVLINE
 
 --------------------------------------------------------------
   [ok]   found the Gluetun .env
   $CHK
+  $ENVCHK
   [note] other Dockhand networks: ${OTHER:-none}
 
-  Now replace the two CHANGE_ME values:
-    DDNS_HOST          your DDNS hostname
-    DOCKHAND_ENV_NAME  the name in Dockhand's environment menu
+  Only DDNS_HOST is left. Replace CHANGE_ME.example.com with the
+  DDNS hostname that follows your VPN endpoint. Nothing on this
+  host knows it, so it is the one value you have to supply.
+
+  If Dockhand has authentication turned on, also add a line:
+    DOCKHAND_TOKEN=dh_your_token_here
 ==============================================================
 
 OUT
@@ -116,8 +136,9 @@ else
   gluetun working dir   : ${WD:-<gluetun container not found>}
   resolved host dir     : ${DIR:-<no matching Dockhand mount>}
 
-  Fix the names on the first line to match your containers,
-  then run it again. List them with:  sudo docker ps --format '{{.Names}}'
+  Fix the names at the top of this script to match your
+  containers, then run it again. List them with:
+    sudo docker ps --format '{{.Names}}'
 ==============================================================
 
 OUT
@@ -128,14 +149,13 @@ fi
 
 ---
 
-## Step 2 — Fill in the two CHANGE_ME values
+## Step 2 — Fill in DDNS_HOST
 
-| Replace | With |
-| --- | --- |
-| `DDNS_HOST` | Your DDNS hostname, e.g. `vpn-endpoint.example.com` |
-| `DOCKHAND_ENV_NAME` | The name in Dockhand's environment menu, exactly as shown |
+Replace `CHANGE_ME.example.com` with the DDNS hostname that follows your VPN endpoint.
 
-Keep the quotes around anything containing spaces. You now have your whole `.env`.
+That is the only value the script cannot work out, because nothing on the host knows it. If it also printed `DOCKHAND_ENV_NAME="CHANGE_ME"`, copy that one from Dockhand's environment menu too.
+
+You now have your whole `.env`.
 
 ---
 
@@ -143,7 +163,7 @@ Keep the quotes around anything containing spaces. You now have your whole `.env
 
 1. **New Compose stack.** Name it `gluetun-ddns`. It must not have the same name as your Gluetun stack, or the watcher will refuse to start.
 2. **Compose editor:** paste all of [`compose.yaml`](compose.yaml), unchanged.
-3. **Environment editor:** paste the five lines from step 1, with the two `CHANGE_ME` values filled in.
+3. **Environment editor:** paste the five lines from step 1, with `DDNS_HOST` filled in.
 4. **Deploy.**
 
 That is the entire `.env`. Everything else has a working default, listed under [Optional settings](#optional-settings).

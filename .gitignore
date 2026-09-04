@@ -1,0 +1,17 @@
+# Installation-specific configuration. Never commit: TARGET_ENV_FILE_HOST
+# reveals host paths and DOCKHAND_TOKEN is a live API credential.
+.env
+.env.*
+!.env.example
+
+# The live endpoint file is rewritten at runtime and is per-installation.
+endpoint.env
+
+# macOS
+.DS_Store
+
+# Editors
+*.swp
+*~
+.idea/
+.vscode/

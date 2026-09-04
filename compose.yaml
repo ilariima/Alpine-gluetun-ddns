@@ -10,7 +10,10 @@ services:
       DEPLOY_TIMEOUT: ${DEPLOY_TIMEOUT:-300}
       MAX_DEPLOY_BACKOFF: ${MAX_DEPLOY_BACKOFF:-900}
       TARGET_VARIABLE: ${TARGET_VARIABLE:-WIREGUARD_ENDPOINT_IP}
-      TARGET_ENV_FILE: /target/endpoint.env
+      # The stack directory is mounted at /target, so this is the file
+      # inside it that the watcher edits. Normally the stack's own .env.
+      TARGET_ENV_FILE: /target/${TARGET_ENV_FILENAME:-.env}
+      TARGET_DIR: /target
       STATE_FILE: /state/applied-ip
       DOCKHAND_URL: ${DOCKHAND_URL:-http://dockhand:3000}
       DOCKHAND_ENV_NAME: ${DOCKHAND_ENV_NAME:-}
@@ -21,9 +24,12 @@ services:
       # watcher can refuse to force-redeploy itself.
       WATCHER_STACK: ${COMPOSE_PROJECT_NAME:-}
     volumes:
+      # The whole stack directory, not just the file. A single-file bind
+      # mount is severed the moment anything replaces the file on the
+      # host, and Dockhand rewrites stack .env files when you edit them.
       - type: bind
-        source: ${TARGET_ENV_FILE_HOST:?Set TARGET_ENV_FILE_HOST in .env}
-        target: /target/endpoint.env
+        source: ${GLUETUN_STACK_DIR_HOST:?Set GLUETUN_STACK_DIR_HOST in .env}
+        target: /target
         bind:
           create_host_path: false
       - gluetun_ddns_state:/state
@@ -50,6 +56,7 @@ services:
         # script still starts if it is run with a leaner environment.
         MAX_DEPLOY_BACKOFF=$${MAX_DEPLOY_BACKOFF:-900}
         WATCHER_STACK=$${WATCHER_STACK:-}
+        TARGET_DIR=$${TARGET_DIR:-/target}
 
         log() {
           echo "$$(date) $$*"
@@ -86,8 +93,15 @@ services:
         [ -n "$$DDNS_HOST" ] || config_error "DDNS_HOST is empty"
         [ -n "$$DOCKHAND_URL" ] || config_error "DOCKHAND_URL is empty"
         [ -n "$$DOCKHAND_STACK" ] || config_error "DOCKHAND_STACK is empty"
-        [ -f "$$TARGET_ENV_FILE" ] || config_error "target env file does not exist: $$TARGET_ENV_FILE"
-        [ -w "$$TARGET_ENV_FILE" ] || config_error "target env file is not writable: $$TARGET_ENV_FILE"
+
+        [ -d "$$TARGET_DIR" ] || \
+          config_error "the Gluetun stack directory is not mounted at $$TARGET_DIR; check GLUETUN_STACK_DIR_HOST"
+        [ -f "$$TARGET_ENV_FILE" ] || \
+          config_error "env file does not exist: $$TARGET_ENV_FILE (check GLUETUN_STACK_DIR_HOST and TARGET_ENV_FILENAME)"
+        [ -w "$$TARGET_ENV_FILE" ] || config_error "env file is not writable: $$TARGET_ENV_FILE"
+        # The file is replaced by rename, so the directory must be writable too.
+        [ -w "$$TARGET_DIR" ] || \
+          config_error "the stack directory $$TARGET_DIR is not writable, which is required to replace the env file atomically"
 
         if [ -n "$$WATCHER_STACK" ] && [ "$$WATCHER_STACK" = "$$DOCKHAND_STACK" ]; then
           config_error "DOCKHAND_STACK is '$$DOCKHAND_STACK', which is this watcher's own stack; it would force-redeploy itself in a loop. Point DOCKHAND_STACK at the Gluetun stack instead."
@@ -160,7 +174,19 @@ services:
         }
 
         update_target_file() {
-          ENV_TMP=$$(mktemp) || return 1
+          # Written beside the original and renamed into place, so the file
+          # is never observed half-written. It holds the WireGuard private
+          # key, so a truncating in-place write is not acceptable.
+          ENV_TMP="$${TARGET_ENV_FILE}.ddns-tmp"
+
+          ENV_OWNER=$$(stat -c '%u:%g' "$$TARGET_ENV_FILE") || {
+            log "ERROR: could not read ownership of $$TARGET_ENV_FILE"
+            return 1
+          }
+          ENV_MODE=$$(stat -c '%a' "$$TARGET_ENV_FILE") || {
+            log "ERROR: could not read permissions of $$TARGET_ENV_FILE"
+            return 1
+          }
 
           if ! awk -v key="$$TARGET_VARIABLE" -v value="$$NEW" '
             BEGIN { found = 0 }
@@ -190,15 +216,24 @@ services:
             return 1
           fi
 
-          # Copied in place rather than moved, so the bind-mounted inode
-          # that Gluetun's stack directory exposes stays the same file.
-          if ! cat "$$ENV_TMP" > "$$TARGET_ENV_FILE"; then
+          if ! chown "$$ENV_OWNER" "$$ENV_TMP"; then
             rm -f "$$ENV_TMP"
-            log "ERROR: could not write the target env file"
+            log "ERROR: could not preserve ownership on the updated env file"
             return 1
           fi
 
-          rm -f "$$ENV_TMP"
+          if ! chmod "$$ENV_MODE" "$$ENV_TMP"; then
+            rm -f "$$ENV_TMP"
+            log "ERROR: could not preserve permissions on the updated env file"
+            return 1
+          fi
+
+          if ! mv "$$ENV_TMP" "$$TARGET_ENV_FILE"; then
+            rm -f "$$ENV_TMP"
+            log "ERROR: could not install the updated env file"
+            return 1
+          fi
+
           return 0
         }
 
@@ -254,6 +289,7 @@ services:
         fi
 
         log "watcher started; checking $${DDNS_HOST} every $${CHECK_INTERVAL}s"
+        log "editing $$TARGET_VARIABLE in $$TARGET_ENV_FILE"
 
         # DNS keeps being polled every CHECK_INTERVAL. Only failed deploy
         # attempts are rate limited, so a persistent Dockhand outage cannot
@@ -275,6 +311,8 @@ services:
 
           if [ -z "$$NEW" ]; then
             log "ERROR: IPv4 DNS resolution failed for $$DDNS_HOST"
+          elif [ ! -f "$$TARGET_ENV_FILE" ]; then
+            log "ERROR: env file disappeared: $$TARGET_ENV_FILE"
           else
             CUR=$$(read_target_value "$$TARGET_ENV_FILE")
             APPLIED=$$(cat "$$STATE_FILE" 2>/dev/null || true)

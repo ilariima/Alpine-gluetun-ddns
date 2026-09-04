@@ -25,7 +25,11 @@ GLUETUN=gluetun; DOCKHAND=dockhand
 
 WD=$(sudo docker inspect "$GLUETUN" --format '{{index .Config.Labels "com.docker.compose.project.working_dir"}}' 2>/dev/null)
 PROJ=$(sudo docker inspect "$GLUETUN" --format '{{index .Config.Labels "com.docker.compose.project"}}' 2>/dev/null)
-NET=$(sudo docker inspect "$DOCKHAND" --format '{{range $n, $_ := .NetworkSettings.Networks}}{{println $n}}{{end}}' 2>/dev/null | grep -v '^$' | head -n 1)
+
+ALL_NETS=$(sudo docker inspect "$DOCKHAND" --format '{{range $n, $_ := .NetworkSettings.Networks}}{{println $n}}{{end}}' 2>/dev/null | grep -v '^$')
+NET=$(printf '%s\n' "$ALL_NETS" | grep -v 'socket-proxy' | head -n 1)
+[ -n "$NET" ] || NET=$(printf '%s\n' "$ALL_NETS" | head -n 1)
+
 HOSTDIR=""; BEST=0
 while IFS='|' read -r dest src; do
   [ -n "$dest" ] || continue
@@ -39,21 +43,39 @@ EOF
 echo "GLUETUN_STACK_DIR_HOST=\"$HOSTDIR\""
 echo "DOCKHAND_STACK=$PROJ"
 echo "DOCKHAND_NETWORK=$NET"
-[ -f "$HOSTDIR/.env" ] && echo "# OK: found the Gluetun .env" || echo "# PROBLEM: no .env at $HOSTDIR"
+echo
+if sudo test -f "$HOSTDIR/.env"; then
+  echo "# OK: found the Gluetun .env"
+  sudo grep -q '^WIREGUARD_ENDPOINT_IP=' "$HOSTDIR/.env" \
+    && echo "# OK: it sets WIREGUARD_ENDPOINT_IP" \
+    || echo "# NOTE: WIREGUARD_ENDPOINT_IP not there yet; the watcher will add it"
+else
+  echo "# PROBLEM: no .env at $HOSTDIR"
+fi
+case "$NET" in *socket-proxy*)
+  echo "# WARNING: Dockhand is only on its socket-proxy network. This works,"
+  echo "#   but consider attaching Dockhand to another network too." ;;
+esac
+OTHER=$(printf '%s\n' "$ALL_NETS" | grep -v "^${NET}$" | tr '\n' ' ')
+[ -n "$(printf '%s' "$OTHER" | tr -d ' ')" ] && echo "# other Dockhand networks you could use: $OTHER"
 ```
 
-It prints three ready-to-paste lines:
+It prints three ready-to-paste lines, then checks them:
 
 ```text
 GLUETUN_STACK_DIR_HOST="/var/lib/docker/volumes/dockhand_dockhand_data/_data/stacks/Your Environment/gluetun"
 DOCKHAND_STACK=gluetun
 DOCKHAND_NETWORK=your_dockhand_network
+
 # OK: found the Gluetun .env
+# OK: it sets WIREGUARD_ENDPOINT_IP
 ```
 
-**Copy those three lines.** If the last line says `PROBLEM`, see [If something goes wrong](#if-something-goes-wrong).
+**Copy those three lines.** Two `OK`s means the values are good.
 
-If Dockhand sits on several networks, the command picks the first. Any network Dockhand is on will work.
+If you see `PROBLEM`, the path is wrong — check that `$GLUETUN` and `$DOCKHAND` on the first line match your real container names.
+
+Dockhand is usually on more than one network. The command skips its `socket-proxy` network, because the watcher has no business being able to reach a Docker socket proxy, and picks a normal one. Any other network Dockhand is on works too, and they are listed at the end if you want a different one.
 
 ---
 
@@ -125,6 +147,7 @@ That's it. You're done.
 | Log message | What to do |
 | --- | --- |
 | `env file does not exist` | `GLUETUN_STACK_DIR_HOST` is wrong. Re-run step 1 and use its exact output, quotes included. |
+| Step 1 says `PROBLEM: no .env` | The container names on the first line of the command do not match yours, or Gluetun's stack has no `.env`. The path itself is usually right. |
 | `the stack directory /target is not writable` | The watcher replaces the file by rename, so it needs write access to the directory, not just the file. |
 | `Dockhand environment ... was not found` | `DOCKHAND_ENV_NAME` must match Dockhand exactly, including spaces and capitals. |
 | `Could not resolve host: dockhand` | `DOCKHAND_NETWORK` is not a network Dockhand is on, or your Dockhand container is not named `dockhand`. |

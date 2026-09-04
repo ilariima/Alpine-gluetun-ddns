@@ -72,6 +72,7 @@ NETS=$(sudo docker inspect "$DOCKHAND" --format '{{range $n, $_ := .NetworkSetti
 NET=$(printf '%s\n' "$NETS" | grep -v 'socket-proxy' | head -n 1); [ -n "$NET" ] || NET=$(printf '%s\n' "$NETS" | head -n 1)
 OTHER=$(printf '%s\n' "$NETS" | grep -v "^${NET}$" | tr '\n' ' ')
 
+
 # Dockhand stores stacks as .../stacks/<environment>/<stack>, so the
 # environment name is the directory above the stack directory.
 ENVNAME=$(basename "$(dirname "$WD")" 2>/dev/null)
@@ -108,7 +109,6 @@ GLUETUN_STACK_DIR_HOST="$DIR"
 DOCKHAND_STACK=$PROJ
 DOCKHAND_NETWORK=$NET
 $ENVLINE
-
 --------------------------------------------------------------
   [ok]   found the Gluetun .env
   $CHK
@@ -224,7 +224,11 @@ That's it. You're done.
 
 ## Optional settings
 
-Only add these if you want to change something. All have defaults.
+Only add these if you want to change something. All have defaults, and a 5-line `.env` is a complete, working configuration — the defaults are preferences, not blanks you must fill.
+
+The one to know about is `DOCKHAND_TOKEN`: it is empty by default, which is correct only if Dockhand authentication is off. With it on you get `401` in the log and just add the token.
+
+`DOCKHAND_URL` is `http://dockhand:3000`, which is right for a normal Dockhand install. The rest only change timing, naming, or which variable is edited.
 
 | Variable | Default | What it does |
 | --- | --- | --- |

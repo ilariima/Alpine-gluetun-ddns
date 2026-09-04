@@ -12,6 +12,7 @@ NETS=$(sudo docker inspect "$DOCKHAND" --format '{{range $n, $_ := .NetworkSetti
 NET=$(printf '%s\n' "$NETS" | grep -v 'socket-proxy' | head -n 1); [ -n "$NET" ] || NET=$(printf '%s\n' "$NETS" | head -n 1)
 OTHER=$(printf '%s\n' "$NETS" | grep -v "^${NET}$" | tr '\n' ' ')
 
+
 # Dockhand stores stacks as .../stacks/<environment>/<stack>, so the
 # environment name is the directory above the stack directory.
 ENVNAME=$(basename "$(dirname "$WD")" 2>/dev/null)
@@ -48,7 +49,6 @@ GLUETUN_STACK_DIR_HOST="$DIR"
 DOCKHAND_STACK=$PROJ
 DOCKHAND_NETWORK=$NET
 $ENVLINE
-
 --------------------------------------------------------------
   [ok]   found the Gluetun .env
   $CHK

@@ -1,219 +1,207 @@
 # Gluetun DDNS watcher for Dockhand
 
-Gluetun's `WIREGUARD_ENDPOINT_IP` is a fixed address. If your VPN endpoint is behind a dynamic address, the tunnel breaks whenever that address changes.
+If your VPN endpoint is on a dynamic address, Gluetun's `WIREGUARD_ENDPOINT_IP` goes stale and the tunnel dies. This watches your DDNS hostname and, when the address changes, updates Gluetun's `.env` and tells Dockhand to redeploy Gluetun.
 
-This is a small sidecar that watches an IPv4 DDNS hostname, writes the new address into the Gluetun stack's own `.env`, and asks Dockhand to force-redeploy the Gluetun stack. Restarting the container is not enough: Docker keeps the environment baked into the existing container, so only a force-recreate picks up the changed file.
+Setup is: run one command, paste two things into Dockhand, done. You do not change your Gluetun stack and you do not create any files.
 
-Setup is two pastes and a fill-in-the-blanks. You do not edit the Gluetun stack, and you do not create any files by hand.
+## Before you start
 
-## What this guide assumes
+You need these already working:
 
-This builds on a working setup. It is not a from-scratch VPN guide. You need all of the following already in place:
+- **Dockhand**, running and managing your stacks
+- **Gluetun**, already deployed as a Dockhand stack and connecting fine
+- Gluetun using a **custom WireGuard provider**, so its `.env` has `WIREGUARD_ENDPOINT_IP`
+- A **DDNS hostname with an IPv4 A record**
+- **Shell access to the Docker host** for step 1
 
-- **Dockhand** is already running and managing your stacks. This is the whole mechanism the watcher uses; there is no Docker socket and no fallback. Dockhand's API docs: <https://dockhand.pro/manual/>
-- **Gluetun is already deployed as a Dockhand-managed Compose stack** and working. If the tunnel has never come up, fix that first.
-- **Gluetun uses a custom WireGuard provider** with `WIREGUARD_ENDPOINT_IP` set in that stack's `.env`. Providers configured by server name or country do not use this variable and do not need this watcher.
-- **The Gluetun stack's files live on the same Docker host** the watcher runs on, in a directory you can bind-mount.
-- **Your DDNS hostname has an IPv4 `A` record.** IPv6-only or CNAME-only will not work.
-- **Shell access to the Docker host**, for the read-only commands in step 1. That is the only terminal work; nothing in this guide asks you to create or edit a file from a shell.
-- Dockhand authentication may be on or off. A token is only needed when it is on.
+If your containers are not named `gluetun` and `dockhand`, change the first line of the command in step 1.
 
-## What it does not need
+---
 
-- No changes to your Gluetun stack, its compose file, or its `env_file` list
-- No files created or edited by hand
-- No Docker socket and no socket proxy
-- No exposed ports
-- No image to build; it runs stock `alpine:latest`
-
-## How it works
-
-The watcher bind-mounts the Gluetun stack **directory** and edits one variable in the stack's `.env`, leaving every other line, including your WireGuard keys, exactly as it found them. The file is rewritten beside the original and renamed into place, so it is never observed half-written and its owner and permissions are preserved.
-
-The directory is mounted rather than the single file on purpose. A single-file bind mount is severed the moment anything replaces the file on the host, and Dockhand rewrites a stack's `.env` whenever you edit it in the UI. Mounting the directory means the watcher keeps working across that.
-
-## 1. Collect the values
-
-These commands only read. Run them on the Docker host.
-
-**The Gluetun stack directory.** First ask Gluetun where its project lives:
+## Step 1 — Run this on your Docker host
 
 ```bash
-sudo docker inspect gluetun --format '{{index .Config.Labels "com.docker.compose.project.working_dir"}}'
+GLUETUN=gluetun; DOCKHAND=dockhand
+
+WD=$(sudo docker inspect "$GLUETUN" --format '{{index .Config.Labels "com.docker.compose.project.working_dir"}}' 2>/dev/null)
+PROJ=$(sudo docker inspect "$GLUETUN" --format '{{index .Config.Labels "com.docker.compose.project"}}' 2>/dev/null)
+NET=$(sudo docker inspect "$DOCKHAND" --format '{{range $n, $_ := .NetworkSettings.Networks}}{{println $n}}{{end}}' 2>/dev/null | grep -v '^$' | head -n 1)
+HOSTDIR=""; BEST=0
+while IFS='|' read -r dest src; do
+  [ -n "$dest" ] || continue
+  case "$WD" in "$dest"/*|"$dest")
+    [ "${#dest}" -gt "$BEST" ] && { BEST=${#dest}; HOSTDIR="${src}${WD#"$dest"}"; } ;;
+  esac
+done <<EOF
+$(sudo docker inspect "$DOCKHAND" --format '{{range .Mounts}}{{.Destination}}|{{.Source}}{{"\n"}}{{end}}' 2>/dev/null)
+EOF
+
+echo "GLUETUN_STACK_DIR_HOST=\"$HOSTDIR\""
+echo "DOCKHAND_STACK=$PROJ"
+echo "DOCKHAND_NETWORK=$NET"
+[ -f "$HOSTDIR/.env" ] && echo "# OK: found the Gluetun .env" || echo "# PROBLEM: no .env at $HOSTDIR"
 ```
 
-That path is inside the Dockhand container, so translate it to a host path using Dockhand's mounts:
-
-```bash
-sudo docker inspect dockhand --format '{{range .Mounts}}{{println .Source "->" .Destination}}{{end}}'
-```
-
-Match the start of the working directory to a mount destination and swap in its source. For example:
+It prints three ready-to-paste lines:
 
 ```text
-Gluetun working directory (inside Dockhand):
-/app/data/stacks/Your Environment/gluetun
-
-Dockhand mount:
-/var/lib/docker/volumes/dockhand_dockhand_data/_data -> /app/data
-
-Host directory (this is GLUETUN_STACK_DIR_HOST):
-/var/lib/docker/volumes/dockhand_dockhand_data/_data/stacks/Your Environment/gluetun
+GLUETUN_STACK_DIR_HOST="/var/lib/docker/volumes/dockhand_dockhand_data/_data/stacks/Your Environment/gluetun"
+DOCKHAND_STACK=gluetun
+DOCKHAND_NETWORK=your_dockhand_network
+# OK: found the Gluetun .env
 ```
 
-Confirm the stack's `.env` is really there, and that it has the variable:
+**Copy those three lines.** If the last line says `PROBLEM`, see [If something goes wrong](#if-something-goes-wrong).
 
-```bash
-sudo grep -c '^WIREGUARD_ENDPOINT_IP=' "/your/host/path/to/the/gluetun/stack/.env"
+If Dockhand sits on several networks, the command picks the first. Any network Dockhand is on will work.
+
+---
+
+## Step 2 — Two values you already know
+
+| Paste into | What it is |
+| --- | --- |
+| `DDNS_HOST` | Your DDNS hostname, e.g. `vpn-endpoint.example.com` |
+| `DOCKHAND_ENV_NAME` | The name in Dockhand's environment dropdown, exactly as shown |
+
+---
+
+## Step 3 — Create the stack in Dockhand
+
+1. **New Compose stack.** Name it `gluetun-ddns`. Do not name it the same as your Gluetun stack.
+2. **Compose editor:** paste all of [`compose.yaml`](compose.yaml), unchanged.
+3. **Environment editor:** paste this, filling in your five values (same as [`.env.example`](.env.example)):
+
+```dotenv
+DDNS_HOST=vpn-endpoint.example.com
+GLUETUN_STACK_DIR_HOST="/paste/from/step/1"
+DOCKHAND_STACK=gluetun
+DOCKHAND_NETWORK=your_dockhand_network
+DOCKHAND_ENV_NAME="Your Environment"
 ```
 
-`1` means you are in the right place. `0` means the file exists but the variable is absent; the watcher will add it. An error means the path is wrong.
+4. **Deploy.**
 
-**The Gluetun stack name**, for `DOCKHAND_STACK`:
+That is the whole `.env`. Everything else has a working default. Keep the quotes around any value containing spaces.
 
-```bash
-sudo docker inspect gluetun --format '{{index .Config.Labels "com.docker.compose.project"}}'
+If Dockhand has authentication turned on, add one more line with an API token:
+
+```dotenv
+DOCKHAND_TOKEN=dh_your_token_here
 ```
 
-**A network Dockhand is attached to**, for `DOCKHAND_NETWORK`:
+---
 
-```bash
-sudo docker inspect dockhand --format '{{range $name, $_ := .NetworkSettings.Networks}}{{println $name}}{{end}}'
-```
-
-**The environment name**, for `DOCKHAND_ENV_NAME`, is the one shown in Dockhand's environment selector. It must match exactly, including spaces and capitalization.
-
-**The Dockhand URL** is normally `http://dockhand:3000` when the container is named `dockhand`.
-
-## 2. Create the stack in Dockhand
-
-1. Create a new Compose stack. Name it something other than your Gluetun stack; `gluetun-ddns` is fine. The watcher refuses to start if you point it at itself.
-2. Paste [`compose.yaml`](compose.yaml) into the Compose editor, unchanged.
-3. Paste [`.env.example`](.env.example) into the stack's environment-file editor.
-4. Fill in the values from step 1. The two you must change are `DDNS_HOST` and `GLUETUN_STACK_DIR_HOST`.
-5. Deploy.
-
-The network named by `DOCKHAND_NETWORK` must already exist. The stack brings its own egress network and state volume.
-
-## 3. Verify
+## Step 4 — Check it worked
 
 ```bash
 sudo docker logs -f gluetun-ddns
 ```
 
-The first start force-redeploys the Gluetun stack once and records what it applied. Expected output:
+You should see it redeploy Gluetun once, then go quiet:
 
 ```text
 using Dockhand environment 'Your Environment' (id 1)
 watcher started; checking vpn-endpoint.example.com every 60s
 editing WIREGUARD_ENDPOINT_IP in /target/.env
 DDNS changed: 203.0.113.9 -> 203.0.113.10
-WIREGUARD_ENDPOINT_IP updated to 203.0.113.10
 requesting Dockhand force-redeploy of stack 'gluetun'
-{"success":true,"output":" Container gluetun Recreate ..."}
 SUCCESS: stack 'gluetun' recreated with WIREGUARD_ENDPOINT_IP=203.0.113.10
 no change (203.0.113.10)
 ```
 
-Confirm the recreated container actually received it:
+`no change` every 60 seconds means it is working. Confirm Gluetun actually got the address:
 
 ```bash
 sudo docker inspect gluetun --format '{{range .Config.Env}}{{println .}}{{end}}' | grep '^WIREGUARD_ENDPOINT_IP='
 ```
 
-## What happens on each check
+That's it. You're done.
 
-1. Resolve the hostname's IPv4 `A` record.
-2. Validate the result is a real IPv4 address; reject anything else.
-3. If it differs from the file, rewrite that one variable in the stack's `.env` and read it back to confirm.
-4. `POST /api/stacks/<stack>/deploy` to Dockhand with `forceRecreate: true`.
-5. Record the applied address and target only after Dockhand returns `success: true`.
-6. On failure, schedule a retry using the backoff below.
+---
 
-If several valid `A` records come back, the watcher sorts them and always takes the first, so the choice is stable rather than following resolver rotation.
+## If something goes wrong
 
-## Retry behavior
+| Log message | What to do |
+| --- | --- |
+| `env file does not exist` | `GLUETUN_STACK_DIR_HOST` is wrong. Re-run step 1 and use its exact output, quotes included. |
+| `the stack directory /target is not writable` | The watcher replaces the file by rename, so it needs write access to the directory, not just the file. |
+| `Dockhand environment ... was not found` | `DOCKHAND_ENV_NAME` must match Dockhand exactly, including spaces and capitals. |
+| `Could not resolve host: dockhand` | `DOCKHAND_NETWORK` is not a network Dockhand is on, or your Dockhand container is not named `dockhand`. |
+| `401` or `403` | Dockhand authentication is on. Add `DOCKHAND_TOKEN`. |
+| `which is this watcher's own stack` | `DOCKHAND_STACK` is naming the watcher instead of Gluetun. |
+| `IPv4 DNS resolution failed` | Your hostname has no A record. Check with `sudo docker run --rm alpine sh -c 'apk add -q bind-tools && dig +short A your-host.example.com'` |
+| File changes but Gluetun keeps the old value | The redeploy failed. Look further up the log, and check `DOCKHAND_STACK`. |
 
-DNS is polled every `CHECK_INTERVAL` no matter what. Only failed deploy attempts are rate limited.
+---
 
-The first failure waits `CHECK_INTERVAL`, and each further consecutive failure doubles it, up to `MAX_DEPLOY_BACKOFF`. With the defaults the gap grows 60s, 120s, 240s, 480s, then holds at 900s. Success resets it, and a newly resolved address clears it immediately, so a real DDNS change is never delayed by earlier failures.
+## Optional settings
 
-This matters because the deploy force-recreates the whole Gluetun stack. Without backoff, a Dockhand that is reachable but failing would be asked to tear down and rebuild that stack every cycle for as long as the fault lasted.
+Only add these if you want to change something. All have defaults.
 
-If the watcher cannot install `curl`, `bind-tools` and `jq` at startup, it retries instead of exiting, since the network it needs may be the one it is about to repair. It reports unhealthy while that is the case.
-
-## Settings
-
-Only `DDNS_HOST` and `GLUETUN_STACK_DIR_HOST` normally need changing. Everything else has a working default.
-
-| Variable | Default | Purpose |
+| Variable | Default | What it does |
 | --- | --- | --- |
-| `DDNS_HOST` | — | Hostname whose IPv4 address is followed |
-| `GLUETUN_STACK_DIR_HOST` | — | Host path to the Gluetun stack directory |
-| `DOCKHAND_URL` | `http://dockhand:3000` | Dockhand as seen from the watcher |
-| `DOCKHAND_NETWORK` | — | An existing network Dockhand is on |
-| `DOCKHAND_ENV_NAME` | — | Environment name shown in Dockhand |
-| `DOCKHAND_ENV_ID` | empty | Numeric id; wins over the name if set |
-| `DOCKHAND_STACK` | — | Compose project name of the Gluetun stack |
-| `DOCKHAND_TOKEN` | empty | Only if Dockhand authentication is on |
-| `TARGET_VARIABLE` | `WIREGUARD_ENDPOINT_IP` | The variable to rewrite |
-| `TARGET_ENV_FILENAME` | `.env` | The file inside the stack directory to edit |
 | `CHECK_INTERVAL` | `60` | Seconds between DNS checks |
-| `STARTUP_DELAY` | `15` | Seconds before the first check |
-| `DEPLOY_TIMEOUT` | `300` | Seconds allowed for one deploy request |
-| `MAX_DEPLOY_BACKOFF` | `900` | Ceiling on the wait between failed deploys |
-| `SIDECAR_CONTAINER_NAME` | `gluetun-ddns` | Watcher container name |
+| `DOCKHAND_URL` | `http://dockhand:3000` | Where Dockhand is, from inside the container |
+| `DOCKHAND_TOKEN` | empty | Only if Dockhand authentication is on |
+| `DOCKHAND_ENV_ID` | empty | Numeric id instead of the name |
+| `TARGET_VARIABLE` | `WIREGUARD_ENDPOINT_IP` | The variable to keep updated |
+| `TARGET_ENV_FILENAME` | `.env` | Which file in the stack directory to edit |
+| `STARTUP_DELAY` | `15` | Seconds to wait before the first check |
+| `DEPLOY_TIMEOUT` | `300` | Seconds allowed for one deploy |
+| `MAX_DEPLOY_BACKOFF` | `900` | Longest wait between failed deploys |
+| `SIDECAR_CONTAINER_NAME` | `gluetun-ddns` | Container name |
 | `WATCHER_IMAGE` | `alpine:latest` | Pin it if you prefer |
 
-## Troubleshooting
+---
 
-### `env file does not exist`
+## Optional: keep the watcher away from your keys
 
-`GLUETUN_STACK_DIR_HOST` is wrong. It must be the absolute host path to the directory containing the Gluetun stack's `.env`, not a path inside the Dockhand container. Re-run the translation in step 1.
+Everything above mounts the Gluetun stack directory read-write, so the watcher **can** write to the folder holding your WireGuard private key. It only ever rewrites one variable, but the access is real.
 
-### `the stack directory /target is not writable`
+If you would rather it could not reach your keys at all, give it a second env file holding nothing but the endpoint. This costs you a small edit to the Gluetun stack, which is the thing the main guide avoids.
 
-The watcher replaces the env file by rename, so it needs write permission on the directory, not just the file.
+**1.** In your Gluetun stack directory, create `endpoint.env` with the current address:
 
-### `Dockhand environment ... was not found`
-
-`DOCKHAND_ENV_NAME` must match Dockhand exactly, including spaces and capitalization. Or set the numeric `DOCKHAND_ENV_ID` instead.
-
-### `Could not resolve host: dockhand`
-
-`DOCKHAND_NETWORK` is not a network shared with Dockhand, or `DOCKHAND_URL` names the wrong container.
-
-### Dockhand returns `401` or `403`
-
-Authentication is enabled. Set `DOCKHAND_TOKEN` to a valid API token.
-
-### `which is this watcher's own stack`
-
-`DOCKHAND_STACK` names the watcher's own Dockhand stack. It must name the Gluetun stack.
-
-### The file changes but Gluetun still has the old value
-
-The stack was not actually recreated. Check the logs for a failed deploy, and confirm `DOCKHAND_STACK` is the Gluetun project name from step 1.
-
-### Repeated DNS failures
-
-Confirm the hostname really has an IPv4 `A` record:
-
-```bash
-sudo docker run --rm alpine:latest sh -c 'apk add -q bind-tools && dig +short A your-hostname.example.com'
+```dotenv
+WIREGUARD_ENDPOINT_IP=203.0.113.10
 ```
 
-## Notes and limits
+**2.** Remove `WIREGUARD_ENDPOINT_IP` from Gluetun's main `.env`. Leave everything else.
 
-**The whole stack is recreated.** Dockhand force-redeploys the stack named by `DOCKHAND_STACK`. If that stack holds Gluetun plus other services, those are recreated too.
+**3.** In the Gluetun stack's compose file, load both files, `endpoint.env` **second**:
 
-**Services in other stacks using `network_mode: container:gluetun`** will hold a reference to the destroyed container. Keep network-namespace-dependent services in the same Compose stack as Gluetun.
+```yaml
+    env_file:
+      - .env
+      - endpoint.env
+```
 
-**The watcher can write to the Gluetun stack directory.** That is the cost of not modifying your Gluetun stack: the mount is read-write, so the directory holding your WireGuard keys is writable by this container. The script only ever touches the one variable in the one file, and the rename is atomic, but the access is real. If you would rather it not have that reach, point `TARGET_ENV_FILENAME` at a second env file that holds only the endpoint variable and add that file to Gluetun's `env_file` list after `.env` — at the cost of the stack edit this guide otherwise avoids.
+Order matters. When the same variable is in two `env_file` entries, Compose keeps the value from the last one.
 
-**Editing the Gluetun stack in Dockhand** rewrites its `.env` and can revert the endpoint address. The watcher notices on its next check and re-applies it.
+**4.** Redeploy the Gluetun stack once.
 
-**Updating the watcher** is an ordinary redeploy. Its state volume survives, so a routine update does not trigger an unnecessary Gluetun deployment.
+**5.** Add this to the watcher's `.env` and redeploy the watcher:
+
+```dotenv
+TARGET_ENV_FILENAME=endpoint.env
+```
+
+The watcher now only ever rewrites `endpoint.env`. Your private key stays in `.env`, which the watcher never touches.
+
+---
+
+## What it actually does
+
+Every `CHECK_INTERVAL` seconds it resolves your hostname, checks the result is a real IPv4 address, and compares it to the file. If it changed, it rewrites that one line, reads it back to confirm, then asks Dockhand to force-recreate the Gluetun stack. A plain restart is not enough, because Docker keeps the environment baked into the existing container.
+
+It records what it applied, so restarting or updating the watcher does not trigger a pointless Gluetun redeploy.
+
+If a deploy fails it backs off: 60s, then 120s, 240s, 480s, up to 15 minutes, so a Dockhand problem cannot mean recreating your VPN stack every minute for hours. DNS keeps being checked the whole time, and a genuinely new address retries immediately.
+
+It edits the file by writing a copy alongside and renaming it into place, keeping the owner and permissions, so the file is never half-written. It mounts the stack **directory** rather than the single file, because a single-file mount breaks permanently the moment anything replaces the file, and Dockhand rewrites a stack's `.env` whenever you edit it in the UI.
+
+**One caveat:** Dockhand recreates the whole stack named by `DOCKHAND_STACK`. If other services share that stack, they are recreated too. Anything using `network_mode: container:gluetun` should live in the same stack.
 
 ## License
 

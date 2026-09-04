@@ -21,96 +21,140 @@ If your containers are not named `gluetun` and `dockhand`, change the first line
 ## Step 1 — Run this on your Docker host
 
 ```bash
+curl -fsSLO https://raw.githubusercontent.com/ilariima/Alpine-gluetun-ddns/main/find-my-values.sh
+sh find-my-values.sh
+```
+
+It only reads: two `docker inspect` calls and a check that the file it found exists. Read it first with `cat find-my-values.sh` if you like.
+
+It prints your `.env`, ready to paste:
+
+```text
+==============================================================
+  PASTE THIS into the watcher stack's environment editor
+==============================================================
+
+DDNS_HOST=CHANGE_ME.example.com
+GLUETUN_STACK_DIR_HOST="/var/lib/docker/volumes/dockhand_dockhand_data/_data/stacks/Your Environment/gluetun"
+DOCKHAND_STACK=gluetun
+DOCKHAND_NETWORK=your_dockhand_network
+DOCKHAND_ENV_NAME="CHANGE_ME"
+
+--------------------------------------------------------------
+  [ok]   found the Gluetun .env
+  [ok]   WIREGUARD_ENDPOINT_IP is already set in it
+  [note] other Dockhand networks: dockhand_socket-proxy
+
+  Now replace the two CHANGE_ME values:
+    DDNS_HOST          your DDNS hostname
+    DOCKHAND_ENV_NAME  the name in Dockhand's environment menu
+==============================================================
+```
+
+Two `[ok]` lines means the values are good. If it says **COULD NOT WORK IT OUT**, your containers are named something other than `gluetun` and `dockhand` — edit the two names at the top of the script and run it again.
+
+Dockhand is usually on more than one network. The script skips its `socket-proxy` network, since the watcher has no business reaching a Docker socket proxy, and picks a normal one instead. Others are listed if you want a different one.
+
+<details>
+<summary>Prefer not to download anything? Paste this instead.</summary>
+
+```bash
+# If your containers are named differently, change these two:
 GLUETUN=gluetun; DOCKHAND=dockhand
 
 WD=$(sudo docker inspect "$GLUETUN" --format '{{index .Config.Labels "com.docker.compose.project.working_dir"}}' 2>/dev/null)
 PROJ=$(sudo docker inspect "$GLUETUN" --format '{{index .Config.Labels "com.docker.compose.project"}}' 2>/dev/null)
+NETS=$(sudo docker inspect "$DOCKHAND" --format '{{range $n, $_ := .NetworkSettings.Networks}}{{println $n}}{{end}}' 2>/dev/null | grep -v '^$')
+NET=$(printf '%s\n' "$NETS" | grep -v 'socket-proxy' | head -n 1); [ -n "$NET" ] || NET=$(printf '%s\n' "$NETS" | head -n 1)
+OTHER=$(printf '%s\n' "$NETS" | grep -v "^${NET}$" | tr '\n' ' ')
 
-ALL_NETS=$(sudo docker inspect "$DOCKHAND" --format '{{range $n, $_ := .NetworkSettings.Networks}}{{println $n}}{{end}}' 2>/dev/null | grep -v '^$')
-NET=$(printf '%s\n' "$ALL_NETS" | grep -v 'socket-proxy' | head -n 1)
-[ -n "$NET" ] || NET=$(printf '%s\n' "$ALL_NETS" | head -n 1)
-
-HOSTDIR=""; BEST=0
-while IFS='|' read -r dest src; do
-  [ -n "$dest" ] || continue
-  case "$WD" in "$dest"/*|"$dest")
-    [ "${#dest}" -gt "$BEST" ] && { BEST=${#dest}; HOSTDIR="${src}${WD#"$dest"}"; } ;;
-  esac
+DIR=""; B=0
+while IFS='|' read -r d s; do
+  [ -n "$d" ] || continue
+  case "$WD" in "$d"/*|"$d") [ "${#d}" -gt "$B" ] && { B=${#d}; DIR="${s}${WD#"$d"}"; } ;; esac
 done <<EOF
 $(sudo docker inspect "$DOCKHAND" --format '{{range .Mounts}}{{.Destination}}|{{.Source}}{{"\n"}}{{end}}' 2>/dev/null)
 EOF
 
-echo "GLUETUN_STACK_DIR_HOST=\"$HOSTDIR\""
-echo "DOCKHAND_STACK=$PROJ"
-echo "DOCKHAND_NETWORK=$NET"
-echo
-if sudo test -f "$HOSTDIR/.env"; then
-  echo "# OK: found the Gluetun .env"
-  sudo grep -q '^WIREGUARD_ENDPOINT_IP=' "$HOSTDIR/.env" \
-    && echo "# OK: it sets WIREGUARD_ENDPOINT_IP" \
-    || echo "# NOTE: WIREGUARD_ENDPOINT_IP not there yet; the watcher will add it"
+if [ -n "$DIR" ] && sudo test -f "$DIR/.env"; then
+  sudo grep -q '^WIREGUARD_ENDPOINT_IP=' "$DIR/.env" \
+    && CHK="[ok]   WIREGUARD_ENDPOINT_IP is already set in it" \
+    || CHK="[note] WIREGUARD_ENDPOINT_IP not set yet; the watcher will add it"
+  cat <<OUT
+
+
+==============================================================
+  PASTE THIS into the watcher stack's environment editor
+==============================================================
+
+DDNS_HOST=CHANGE_ME.example.com
+GLUETUN_STACK_DIR_HOST="$DIR"
+DOCKHAND_STACK=$PROJ
+DOCKHAND_NETWORK=$NET
+DOCKHAND_ENV_NAME="CHANGE_ME"
+
+--------------------------------------------------------------
+  [ok]   found the Gluetun .env
+  $CHK
+  [note] other Dockhand networks: ${OTHER:-none}
+
+  Now replace the two CHANGE_ME values:
+    DDNS_HOST          your DDNS hostname
+    DOCKHAND_ENV_NAME  the name in Dockhand's environment menu
+==============================================================
+
+OUT
 else
-  echo "# PROBLEM: no .env at $HOSTDIR"
+  cat <<OUT
+
+
+==============================================================
+  COULD NOT WORK IT OUT
+==============================================================
+
+  container names tried : GLUETUN=$GLUETUN  DOCKHAND=$DOCKHAND
+  gluetun working dir   : ${WD:-<gluetun container not found>}
+  resolved host dir     : ${DIR:-<no matching Dockhand mount>}
+
+  Fix the names on the first line to match your containers,
+  then run it again. List them with:  sudo docker ps --format '{{.Names}}'
+==============================================================
+
+OUT
 fi
-case "$NET" in *socket-proxy*)
-  echo "# WARNING: Dockhand is only on its socket-proxy network. This works,"
-  echo "#   but consider attaching Dockhand to another network too." ;;
-esac
-OTHER=$(printf '%s\n' "$ALL_NETS" | grep -v "^${NET}$" | tr '\n' ' ')
-[ -n "$(printf '%s' "$OTHER" | tr -d ' ')" ] && echo "# other Dockhand networks you could use: $OTHER"
 ```
 
-It prints three ready-to-paste lines, then checks them:
-
-```text
-GLUETUN_STACK_DIR_HOST="/var/lib/docker/volumes/dockhand_dockhand_data/_data/stacks/Your Environment/gluetun"
-DOCKHAND_STACK=gluetun
-DOCKHAND_NETWORK=your_dockhand_network
-
-# OK: found the Gluetun .env
-# OK: it sets WIREGUARD_ENDPOINT_IP
-```
-
-**Copy those three lines.** Two `OK`s means the values are good.
-
-If you see `PROBLEM`, the path is wrong — check that `$GLUETUN` and `$DOCKHAND` on the first line match your real container names.
-
-Dockhand is usually on more than one network. The command skips its `socket-proxy` network, because the watcher has no business being able to reach a Docker socket proxy, and picks a normal one. Any other network Dockhand is on works too, and they are listed at the end if you want a different one.
+</details>
 
 ---
 
-## Step 2 — Two values you already know
+## Step 2 — Fill in the two CHANGE_ME values
 
-| Paste into | What it is |
+| Replace | With |
 | --- | --- |
 | `DDNS_HOST` | Your DDNS hostname, e.g. `vpn-endpoint.example.com` |
-| `DOCKHAND_ENV_NAME` | The name in Dockhand's environment dropdown, exactly as shown |
+| `DOCKHAND_ENV_NAME` | The name in Dockhand's environment menu, exactly as shown |
+
+Keep the quotes around anything containing spaces. You now have your whole `.env`.
 
 ---
 
 ## Step 3 — Create the stack in Dockhand
 
-1. **New Compose stack.** Name it `gluetun-ddns`. Do not name it the same as your Gluetun stack.
+1. **New Compose stack.** Name it `gluetun-ddns`. It must not have the same name as your Gluetun stack, or the watcher will refuse to start.
 2. **Compose editor:** paste all of [`compose.yaml`](compose.yaml), unchanged.
-3. **Environment editor:** paste this, filling in your five values (same as [`.env.example`](.env.example)):
-
-```dotenv
-DDNS_HOST=vpn-endpoint.example.com
-GLUETUN_STACK_DIR_HOST="/paste/from/step/1"
-DOCKHAND_STACK=gluetun
-DOCKHAND_NETWORK=your_dockhand_network
-DOCKHAND_ENV_NAME="Your Environment"
-```
-
+3. **Environment editor:** paste the five lines from step 1, with the two `CHANGE_ME` values filled in.
 4. **Deploy.**
 
-That is the whole `.env`. Everything else has a working default. Keep the quotes around any value containing spaces.
+That is the entire `.env`. Everything else has a working default, listed under [Optional settings](#optional-settings).
 
-If Dockhand has authentication turned on, add one more line with an API token:
+If Dockhand has authentication turned on, add one more line:
 
 ```dotenv
 DOCKHAND_TOKEN=dh_your_token_here
 ```
+
+**Already running an older version of this watcher?** Remove that stack first. Two watchers editing the same file will both force-redeploy Gluetun.
 
 ---
 
@@ -147,7 +191,7 @@ That's it. You're done.
 | Log message | What to do |
 | --- | --- |
 | `env file does not exist` | `GLUETUN_STACK_DIR_HOST` is wrong. Re-run step 1 and use its exact output, quotes included. |
-| Step 1 says `PROBLEM: no .env` | The container names on the first line of the command do not match yours, or Gluetun's stack has no `.env`. The path itself is usually right. |
+| Step 1 says `COULD NOT WORK IT OUT` | Your containers are not named `gluetun` and `dockhand`. Edit the two names at the top of the script and run it again. |
 | `the stack directory /target is not writable` | The watcher replaces the file by rename, so it needs write access to the directory, not just the file. |
 | `Dockhand environment ... was not found` | `DOCKHAND_ENV_NAME` must match Dockhand exactly, including spaces and capitals. |
 | `Could not resolve host: dockhand` | `DOCKHAND_NETWORK` is not a network Dockhand is on, or your Dockhand container is not named `dockhand`. |
